@@ -402,9 +402,9 @@ class SAM(object):
         :param njobs: Numbers of jobs to be run in Parallel.
                       Recommended: 1 if no GPU available, 2*number of GPUs else.
         :param gpus: Number of available GPUs for the algorithm.
-        :param verbose:
-        :param plot:
-        :param plot_generated_pair:
+        :param verbose: verbose mode
+        :param plot: Plot losses interactively. Not recommended if nruns>1
+        :param plot_generated_pair: plots a generated pair interactively.  Not recommended if nruns>1
         :return: Adjacency matrix (A) of the graph estimated by SAM,
                 A[i,j] is the term of the ith variable for the jth generator.
         """
