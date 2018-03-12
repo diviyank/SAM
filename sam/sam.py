@@ -10,9 +10,7 @@ import pandas as pd
 import torch as th
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
-from time import time
 from matplotlib import pyplot as plt
-from sklearn.preprocessing import scale
 
 
 class CNormalized_Linear(th.nn.Module):
@@ -38,9 +36,11 @@ class CNormalized_Linear(th.nn.Module):
             self.bias.data.uniform_(-stdv, stdv)
 
     def forward(self, input):
+        """Feed-forward through the network."""
         return th.nn.functional.linear(input, self.weight.div(self.weight.pow(2).sum(0).sqrt()))
 
     def __repr__(self):
+        """For print purposes."""
         return self.__class__.__name__ + '(' \
             + 'in_features=' + str(self.in_features) \
             + ', out_features=' + str(self.out_features) \
@@ -48,10 +48,11 @@ class CNormalized_Linear(th.nn.Module):
 
 
 class SAM_discriminator(th.nn.Module):
+    """Discriminator for the SAM model."""
+
     def __init__(self, sizes, zero_components=[], **kwargs):
+        """Init the SAM discriminator."""
         super(SAM_discriminator, self).__init__()
-        gpu = kwargs.get('gpu', False)
-        gpu_no = kwargs.get('gpu_no', 0)
         self.sht = kwargs.get('shortcut', False)
         activation_function = kwargs.get('activation_function', th.nn.ReLU)
         activation_argument = kwargs.get('activation_argument', None)
@@ -76,75 +77,61 @@ class SAM_discriminator(th.nn.Module):
         # print(self.layers)
 
     def forward(self, x):
+        """Feed-forward the model."""
         return self.layers(x)
 
 
 class SAM_block(th.nn.Module):
-    """ SAM-Block consisting of parents,
-    a generative network and the output variable
+    """SAM-Block: conditional generator.
+
+    Generates one variable while selecting the parents. Uses filters to do so.
+    One fixed filter and one with parameters on order to keep a fixed skeleton.
     """
 
     def __init__(self, sizes, zero_components=[], **kwargs):
+        """Initialize a generator."""
         super(SAM_block, self).__init__()
         gpu = kwargs.get('gpu', False)
         gpu_no = kwargs.get('gpu_no', 0)
-        self.sht = kwargs.get('shortcut', False)
-        activation_function = kwargs.get('activation_function', th.nn.ReLU)
+        activation_function = kwargs.get('activation_function', th.nn.Tanh)
         activation_argument = kwargs.get('activation_argument', None)
-        initzero = kwargs.get('initzero', False)
         batch_norm = kwargs.get("batch_norm", False)
-        dropout = kwargs.get("dropout", 0.)
         layers = []
 
         for i, j in zip(sizes[:-2], sizes[1:-1]):
             layers.append(CNormalized_Linear(i, j))
             if batch_norm:
                 layers.append(th.nn.BatchNorm1d(j))
-            if dropout != 0.:
-                layers.append(th.nn.Dropout(p=dropout))
             if activation_argument is None:
                 layers.append(activation_function())
             else:
                 layers.append(activation_function(activation_argument))
 
         layers.append(th.nn.Linear(sizes[-2], sizes[-1]))
-
         self.layers = th.nn.Sequential(*layers)
-        if self.sht:
-            self.shortcut = th.nn.Linear(sizes[0], sizes[-1])
 
         # Filtering the unconnected nodes.
         self._filter = th.ones(1, sizes[0])
-
         for i in zero_components:
             self._filter[:, i].zero_()
-            if self.sht:
-                self.shortcut.weight[:, i].data.zero_()
 
-        # self.layers[0].weight.data.normal_()
         self._filter = Variable(self._filter, requires_grad=False)
         self.fs_filter = th.nn.Parameter(self._filter.data)
-        if initzero:
-            self.fs_filter.data[self.fs_filter.data != 0] = 0.0001
 
         if gpu:
             self._filter = self._filter.cuda(gpu_no)
-        # print(self.layers)
 
     def forward(self, x):
-
-        if self.sht:
-            return self.layers(x * (self._filter *
-                                    self.fs_filter).expand_as(x)) + \
-                self.shortcut(x * (self._filter *
-                                   self.fs_filter).expand_as(x))
-        else:
-            return self.layers(x * (self._filter *
-                                    self.fs_filter).expand_as(x))
+        """Feed-forward the model."""
+        return self.layers(x * (self._filter *
+                                self.fs_filter).expand_as(x))
 
 
 class SAM_generators(th.nn.Module):
-    def __init__(self, data_shape, zero_components, nh=200, dnh=200, batch_size=-1, **kwargs):
+    """Ensemble of all the generators."""
+
+    def __init__(self, data_shape, zero_components, nh=200, batch_size=-1, **kwargs):
+        """Init the model."""
         super(SAM_generators, self).__init__()
         if batch_size == -1:
             batch_size = data_shape[0]
@@ -153,7 +140,6 @@ class SAM_generators(th.nn.Module):
         rows, self.cols = data_shape
 
         # building the computation graph
-
         self.noise = [Variable(th.FloatTensor(batch_size, 1))
                       for i in range(self.cols)]
         if gpu:
@@ -166,6 +152,7 @@ class SAM_generators(th.nn.Module):
                 [self.cols + 1, nh, 1], zero_components[i], **kwargs))
 
     def forward(self, x):
+        """Feed-forward the model."""
         for i in self.noise:
             i.data.normal_()
 
@@ -175,7 +162,10 @@ class SAM_generators(th.nn.Module):
 
 
 def run_SAM(df_data, skeleton=None, **kwargs):
-    print(kwargs)
+    """Execute the SAM model.
+
+    :param df_data:
+    """
     gpu = kwargs.get('gpu', False)
     gpu_no = kwargs.get('gpu_no', 0)
 
@@ -183,16 +173,17 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     test_epochs = kwargs.get('test_epochs', 1000)
     batch_size = kwargs.get('batch_size', -1)
 
-    learning_rate = kwargs.get('learning_rate', 0.1)
-    lr_disc = kwargs.get('lr_disc', learning_rate)
+    lr_gen = kwargs.get('lr_gen', 0.1)
+    lr_disc = kwargs.get('lr_disc', lr_gen)
     verbose = kwargs.get('verbose', True)
     regul_param = kwargs.get('regul_param', 0.1)
-    asymfactor = kwargs.get('asymfactor', 'inputweights')
-    plot = kwargs.get("plot", False)
-    nh = kwargs.get('nh', 200)
     dnh = kwargs.get('dnh', None)
-    shortcut = kwargs.get('shortcut', False)
-    d_str = "Epoch: {} -- Disc: {} -- Gen: {} -- L1: {} -- ASYM: {}"
+
+    plot = kwargs.get("plot", False)
+    plot_generated_pair = kwargs.get("plot_generated_pair", False)
+
+    d_str = "Epoch: {} -- Disc: {} -- Gen: {} -- L1: {}"
+
     list_nodes = list(df_data.columns)
     df_data = (df_data[list_nodes]).as_matrix()
     data = df_data.astype('float32')
@@ -216,8 +207,8 @@ def run_SAM(df_data, skeleton=None, **kwargs):
 
     sam = SAM_generators((rows, cols), zero_components, batch_norm=True, **kwargs)
 
-    # UGLY
-    activation_function = kwargs.get('activation_function', th.nn.ReLU)
+    # Begin UGLY
+    activation_function = kwargs.get('activation_function', th.nn.Tanh)
     try:
         del kwargs["activation_function"]
     except KeyError:
@@ -226,31 +217,25 @@ def run_SAM(df_data, skeleton=None, **kwargs):
         [cols, dnh, dnh, 1], batch_norm=True,
         activation_function=th.nn.LeakyReLU,
         activation_argument=0.2, **kwargs)
-    # discriminator_sam = SAM_block(
-    #  [cols, 50, 50, 1], **kwargs)
     kwargs["activation_function"] = activation_function
-    # END of UGLY
+    # End of UGLY
 
     if gpu:
         sam = sam.cuda(gpu_no)
         discriminator_sam = discriminator_sam.cuda(gpu_no)
         data = data.cuda(gpu_no)
 
-    data_list = [data[:, [i]] for i in range(cols)]
-
     # Select parameters to optimize : ignore the non connected nodes
     criterion = th.nn.BCEWithLogitsLoss()
-    g_optimizer = th.optim.Adam(sam.parameters(), lr=learning_rate)
+    g_optimizer = th.optim.Adam(sam.parameters(), lr=lr_gen)
     d_optimizer = th.optim.Adam(
         discriminator_sam.parameters(), lr=lr_disc)
 
-    # Printout value
-    gen = []
     true_variable = Variable(
         th.ones(batch_size, 1), requires_grad=False)
     false_variable = Variable(
         th.zeros(batch_size, 1), requires_grad=False)
-    output_weights = th.zeros(data.shape[1], data.shape[1])
+    causal_filters = th.zeros(data.shape[1], data.shape[1])
 
     def fill_nan(mat):
         mat[mat.ne(mat)] = 0
@@ -259,13 +244,9 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     if gpu:
         true_variable = true_variable.cuda(gpu_no)
         false_variable = false_variable.cuda(gpu_no)
-        output_weights = output_weights.cuda(gpu_no)
+        causal_filters = causal_filters.cuda(gpu_no)
 
-    # print('Init : ', time() - ac)
     data_iterator = DataLoader(data, batch_size=batch_size, shuffle=True)
-    # for i in range(cols):
-    #     vector_iterators[i].set_global(
-    #         batch_size=batch_size, size=data.data.shape[0])
 
     # TRAIN
     for epoch in range(train_epochs + test_epochs):
@@ -276,24 +257,16 @@ def run_SAM(df_data, skeleton=None, **kwargs):
             else:
                 batch = Variable(batch)
             batch_vectors = [batch[:, [i]] for i in range(cols)]
-            ac = time()
 
             g_optimizer.zero_grad()
             d_optimizer.zero_grad()
 
             # Train the discriminator
-
             generated_variables = sam(batch)
-            if verbose and epoch % 200 == 0 and i_batch == 0:
-                print("Init : {}".format(time() - ac))
-                ac = time()
             disc_losses = []
             gen_losses = []
 
             for i in range(cols):
-                # print([type(v) for c in [batch_vectors[:i], [
-                #        generated_variables[i]],
-                #        batch_vectors[i + 1: ]] for v in c])
                 generator_output = th.cat([v for c in [batch_vectors[: i], [
                     generated_variables[i]],
                     batch_vectors[i + 1:]] for v in c], 1)
@@ -305,37 +278,20 @@ def run_SAM(df_data, skeleton=None, **kwargs):
                     criterion(disc_output_detached, false_variable))
 
                 # 2. Train the generator :
-
                 gen_losses.append(criterion(disc_output, true_variable))
 
-            if verbose and epoch % 200 == 0 and i_batch == 0:
-                print('Gen/Disc loss computation : ', time() - ac)
-                ac = time()
-
             true_output = discriminator_sam(batch)
-
-            # adv_loss = sum(disc_losses) / cols + \
-            #     criterion(true_output, true_variable)
             adv_loss = sum(disc_losses) + \
                 criterion(true_output, true_variable) * cols
-
             gen_loss = sum(gen_losses)
 
             adv_loss.backward()
             d_optimizer.step()
 
-            if epoch % 200 == 0 and i_batch == 0:
-                print('Disc optimizer : ', time() - ac)
-                ac = time()
-
-            asymmetry_factors = th.stack(
+            # 3. Compute filter regularization
+            filters = th.stack(
                 [i.fs_filter[0, :-1].abs() for i in sam.blocks], 1)
-
-            l1_reg = regul_param * asymmetry_factors.sum()
-
-            # l2_reg = input_regul_param * \
-            #     sum([i.layers[0].weight.pow(2).sum() for i in sam.blocks])
-
+            l1_reg = regul_param * filters.sum()
             loss = gen_loss + l1_reg
 
             if verbose and epoch % 200 == 0 and i_batch == 0:
@@ -344,22 +300,13 @@ def run_SAM(df_data, skeleton=None, **kwargs):
                                                   adv_loss.cpu().data[0],
                                                   gen_loss.cpu(
                                                   ).data[0] / cols,
-                                                  l1_reg.cpu().data[0], 0))
+                                                  l1_reg.cpu().data[0]))
             loss.backward()
-
-            if epoch % 200 == 0 and i_batch == 0:
-                print('Gen backward : ', time() - ac)
-                ac = time()
 
             # STORE ASSYMETRY values for output
             if epoch > train_epochs:
-                output_weights.add_(asymmetry_factors.data)
-
+                causal_filters.add_(filters.data)
             g_optimizer.step()
-
-            if epoch % 200 == 0 and i_batch == 0:
-                print('Gen optimizer : ', time() - ac)
-                ac = time()
 
             if plot and i_batch == 0:
                 try:
@@ -402,40 +349,53 @@ def run_SAM(df_data, skeleton=None, **kwargs):
                 gen_plt.append(gen_loss.cpu().data[0] / cols)
                 l1_plt.append(l1_reg.cpu().data[0])
 
-            # if epoch % 200 == 0:
-            #     print('Plt : ', time() - ac)
-            #     ac = time()
-            #     if epoch % 200 == 0:
-            #         if epoch ==0:
-            #             plt.ion()
-            #         # gen.append([gene.data for gene in generated_variables])
-            #         to_print = [[0, 1]]  # , [1, 0]]  # [2, 3]]  # , [11, 17]]
-            #         plt.clf()
-            #         for (i, j) in to_print:
-            #             #plt.figure()
-            #             plt.scatter(generated_variables[i].data.cpu().numpy(
-            #             ), batch.data.cpu().numpy()[:, j], label="Y -> X")
-            #             plt.scatter(batch.data.cpu().numpy()[
-            #                 :, i], generated_variables[j].data.cpu().numpy(), label="X -> Y")
-            #
-            #             plt.scatter(batch.data.cpu().numpy()[:, i], batch.data.cpu().numpy()[
-            #                 :, j], label="original data")
-            #             plt.legend()
-            #
-            #             # plt.savefig("test_SAM_adv/fig/epoch_" + str(epoch))
-            #         plt.pause(0.01)
-            #         #plt.show()
-            #         #plt.close()
+            if plot_generated_pair and epoch % 200 == 0:
+                if epoch == 0:
+                    plt.ion()
+                to_print = [[0, 1]]  # , [1, 0]]  # [2, 3]]  # , [11, 17]]
+                plt.clf()
+                for (i, j) in to_print:
 
-    # if gpu:
-        # print(generated_variables)
+                    plt.scatter(generated_variables[i].data.cpu().numpy(
+                    ), batch.data.cpu().numpy()[:, j], label="Y -> X")
+                    plt.scatter(batch.data.cpu().numpy()[
+                        :, i], generated_variables[j].data.cpu().numpy(), label="X -> Y")
 
-        # ]
-    return output_weights.div_(test_epochs).cpu().numpy()
+                    plt.scatter(batch.data.cpu().numpy()[:, i], batch.data.cpu().numpy()[
+                        :, j], label="original data")
+                    plt.legend()
 
-    # else:
-    #     return [[[l.numpy() for l in j] for j in gen],
-    #     output_weights.div_(test_epochs).numpy()]
+                plt.pause(0.01)
+
+    return causal_filters.div_(test_epochs).cpu().numpy()
+
+
+class SAM(object):
+    """Structural Agnostic Model."""
+
+    def __init__(self, lr=0.1, dlr=0.1, l1=0.1, nh=200, dnh=200,
+                 train_epochs=1000, test_epochs=1000):
+        super(SAM, self).__init__()
+
+    def predict(data, skeleton=None, nruns=6, njobs=1, gpus=[], verbose=True,
+                plot=False, plot_generated_pair=False):
+
+        def exec_sam_instance(gpuno=0):
+            return run_SAM(data, skeleton=skel, learning_rate=learning_rate,
+                           type_regul=type_regul,
+                           regul_param=regul, asymmetry_param=asymmetry,
+                           shortcut=shortcut,
+                           nh=n_h, gpu=bool(gpus),
+                           gpu_no=gpuno, train_epochs=args.train,
+                           test_epochs=args.test,
+                           batch_size=args.batch,
+                           plot=args.plot, activation_function=activation_function,
+                           verbose=args.nv, regul_epochs=args.regul, loss=loss, dropout=args.dropout)
+
+        if nruns == 1 and gpus:
+            return exec_sam_instance(gpus[0])
+        elif nruns == 1:
+            r
 
 
 if __name__ == "__main__":
@@ -531,17 +491,7 @@ if __name__ == "__main__":
 
     mat = np.zeros((len(list(data.columns)), len(list(data.columns))))
 
-    def exec_sam_instance(gpuno):
-        return run_SAM(data, skeleton=skel, learning_rate=learning_rate,
-                       type_regul=type_regul,
-                       regul_param=regul, asymmetry_param=asymmetry,
-                       shortcut=shortcut,
-                       nh=n_h, gpu=args.gpu,
-                       gpu_no=gpuno, train_epochs=args.train,
-                       test_epochs=args.test,
-                       asymfactor=asymfactor, batch_size=args.batch,
-                       plot=args.plot, activation_function=activation_function,
-                       verbose=args.nv, regul_epochs=args.regul, loss=loss, dropout=args.dropout)
+
 
     list_out = Parallel(n_jobs=cdt_private.SETTINGS.NB_JOBS)(delayed(exec_sam_instance)(
         idx % len(cdt_private.SETTINGS.GPU_LIST)) for idx in range(args.nruns))

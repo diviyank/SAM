@@ -10,10 +10,10 @@ except ImportError:
 
 def setup_package():
     """Install the package."""
-    setup(name='cdt',
+    setup(name='sam',
           version='0.1',
           description='Structural Agnostic Model',
-          url='https://github.com/Diviyan-Kalainathan/CausalDiscoveryToolbox',
+          url='https://github.com/Diviyan-Kalainathan/SAM',
           author='Diviyan Kalainathan',
           author_email='diviyan.kalainathan@lri.fr',
           license='Apache 2.0',
