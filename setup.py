@@ -9,14 +9,15 @@ except ImportError:
 
 
 def setup_package():
+    """Install the package."""
     setup(name='cdt',
           version='0.1',
-          description='A Toolbox for causal graph inference',
+          description='Structural Agnostic Model',
           url='https://github.com/Diviyan-Kalainathan/CausalDiscoveryToolbox',
           author='Diviyan Kalainathan',
           author_email='diviyan.kalainathan@lri.fr',
           license='Apache 2.0',
-          packages=['cdt'])
+          packages=['sam'])
 
 
 if __name__ == '__main__':
