@@ -5,12 +5,11 @@ Date: 09/3/2018
 """
 
 import math
-import numpy as np
-import pandas as pd
 import torch as th
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from matplotlib import pyplot as plt
+from joblib import Parallel, delayed
 
 
 class CNormalized_Linear(th.nn.Module):
@@ -251,11 +250,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     # TRAIN
     for epoch in range(train_epochs + test_epochs):
         for i_batch, batch in enumerate(data_iterator):
-            if asymfactor == 'grad' or asymfactor == 'gradloss':
-                batch = Variable(batch, requires_grad=True)
-
-            else:
-                batch = Variable(batch)
+            batch = Variable(batch)
             batch_vectors = [batch[:, [i]] for i in range(cols)]
 
             g_optimizer.zero_grad()
@@ -333,8 +328,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
 
                 except NameError:
                     plt.ion()
-                    fig = plt.figure()
-                    ax = fig.add_subplot(111)
+                    plt.figure()
                     plt.xlabel("Epoch")
                     plt.ylabel("Losses")
 
@@ -374,177 +368,62 @@ class SAM(object):
     """Structural Agnostic Model."""
 
     def __init__(self, lr=0.1, dlr=0.1, l1=0.1, nh=200, dnh=200,
-                 train_epochs=1000, test_epochs=1000):
+                 train_epochs=1000, test_epochs=1000, batchsize=-1):
+        """Init and parametrize the SAM model.
+
+        :param lr: Learning rate of the generators
+        :param dlr: Learning rate of the discriminator
+        :param l1: L1 penalization on the causal filters
+        :param nh: Number of hidden units in the generators' hidden layers
+        :param dnh: Number of hidden units in the discriminator's hidden layer$
+        :param train_epochs: Number of training epochs
+        :param test_epochs: Number of test epochs (saving and averaging the causal filters)
+        :param batchsize: Size of the batches to be fed to the SAM model.
+        """
         super(SAM, self).__init__()
+        self.lr = lr
+        self.dlr = dlr
+        self.l1 = l1,
+        self.nh = nh
+        self.dnh = dnh
+        self.train = train_epochs
+        self.test = test_epochs
+        self.batchsize = batchsize
 
-    def predict(data, skeleton=None, nruns=6, njobs=1, gpus=[], verbose=True,
+    def predict(self, data, skeleton=None, nruns=6, njobs=1, gpus=0, verbose=True,
                 plot=False, plot_generated_pair=False):
+        """Execute SAM on a dataset given a skeleton or not.
 
+        :param data: Observational data for estimation of causal relationships by SAM
+        :param skeleton: A priori knowledge about the causal relationships as an adjacency matrix.
+                         Can be fed either directed or undirected links.
+        :param nruns: Number of runs to be made for causal estimation.
+                      Recommended: >5 for optimal performance.
+        :param njobs: Numbers of jobs to be run in Parallel.
+                      Recommended: 1 if no GPU available, 2*number of GPUs else.
+        :param gpus: Number of available GPUs for the algorithm.
+        :param verbose:
+        :param plot:
+        :param plot_generated_pair:
+        :return: Adjacency matrix (A) of the graph estimated by SAM,
+                A[i,j] is the term of the ith variable for the jth generator.
+        """
         def exec_sam_instance(gpuno=0):
-            return run_SAM(data, skeleton=skel, learning_rate=learning_rate,
-                           type_regul=type_regul,
-                           regul_param=regul, asymmetry_param=asymmetry,
-                           shortcut=shortcut,
-                           nh=n_h, gpu=bool(gpus),
-                           gpu_no=gpuno, train_epochs=args.train,
-                           test_epochs=args.test,
-                           batch_size=args.batch,
-                           plot=args.plot, activation_function=activation_function,
-                           verbose=args.nv, regul_epochs=args.regul, loss=loss, dropout=args.dropout)
+            return run_SAM(data, skeleton=skeleton, lr_gen=self.lr, lr_disc=self.dlr,
+                           regul_param=self.l1, nh=self.nh, dnh=self.dnh,
+                           gpu=bool(gpus), gpu_no=gpuno, train_epochs=self.train,
+                           test_epochs=self.test, batch_size=self.batchsize,
+                           plot=plot, verbose=verbose)
 
-        if nruns == 1 and gpus:
-            return exec_sam_instance(gpus[0])
-        elif nruns == 1:
-            r
+        assert nruns > 0
+        if nruns == 1:
+            return exec_sam_instance()
+        else:
+            list_out = Parallel(n_jobs=njobs)(delayed(exec_sam_instance)(
+                                idx % gpus) for idx in range(nruns))
 
-
-if __name__ == "__main__":
-    import cdt_private
-    from cdt_private.utils.metrics import precision_recall
-    import pandas as pd
-    import sys
-    import numpy as np
-    from itertools import product
-    from joblib import Parallel, delayed
-    import torch as th
-    import argparse
-    import datetime
-
-    parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('data', metavar='d', type=str, help='data')
-    parser.add_argument('--skel', metavar='s', type=str,
-                        help='skeleton', default=None)
-    parser.add_argument('--target', metavar='t', type=str,
-                        help='Target file for score computation', default=None)
-    parser.add_argument('--train', metavar='tr', type=int,
-                        help="num of train epochs", default=1000)
-    parser.add_argument('--regul', metavar='r', type=int,
-                        help="num of regul epochs", default=0)
-    parser.add_argument('--test', metavar='te', type=int,
-                        help="num of test epochs", default=1000)
-    parser.add_argument('--nruns', metavar='n', type=int,
-                        help="num of runs", default=1)
-    parser.add_argument('--batchnorm', help="batchnorm", action='store_true')
-    parser.add_argument('--dropout', type=float, help="dropout", default=0.)
-    parser.add_argument('--batch', metavar='b', type=int,
-                        help="batchsize", default=-1)
-    parser.add_argument('--njobs', metavar='j', type=int,
-                        help="num of jobs", default=-1)
-    parser.add_argument('--gpu', help="Use gpu", action='store_true')
-    parser.add_argument('--plot', help="Plot losses", action='store_true')
-    parser.add_argument('--csv', help="CSV file", action='store_true')
-    parser.add_argument('--nv', help="No verbose", action='store_false')
-    parser.add_argument('--log', metavar='l', type=str,
-                        help='Specify a custom log folder', default=".")
-
-    args = parser.parse_args()
-    print(args)
-    if args.csv:
-        sep = ","
-    else:
-        sep = "\t"
-    data = pd.read_csv(args.data, sep=sep)
-
-    if args.skel is not None:
-        skel = pd.read_csv(args.skel, sep=sep)
-        skel = cdt_private.UndirectedGraph(skel)
-    else:
-        skel = None
-
-    if args.target is not None:
-        target = pd.read_csv(args.target, sep=sep)
-        target = cdt_private.DirectedGraph(target)
-    else:
-        target = None
-
-    print(cdt_private.SETTINGS.GPU_LIST)
-    # '1500', '2000', 'res', 'res2', 'res3'
-    out_freq = ['res']  # '0', '500', '1000', '1500',
-    cdt_private.SETTINGS.GPU = args.gpu
-    if not cdt_private.SETTINGS.GPU:
-        cdt_private.SETTINGS.GPU_LIST = [0]
-        print("Forcing gpu list to 0")
-
-    if args.njobs != -1:
-        cdt_private.SETTINGS.NB_JOBS = args.njobs
-    elif args.gpu:
-        cdt_private.SETTINGS.NB_JOBS = len(cdt_private.SETTINGS.GPU_LIST)
-    else:
-        cdt_private.SETTINGS.NB_JOBS = 1
-    # with torch cpu it is wiser to not parallel computation
-    # it parallelizes automatically
-
-    activation_function = th.nn.Tanh  # [th.nn.ReLU, th.nn.Tanh, th.nn.Sigmoid]
-    learning_rate = 0.1  # , 0.005, 0.001]
-
-    type_regul = "l1"
-    regul = .05  # [0.005, 0.001, 0.0005, 0.0001, 0.00005]
-    # [0.1, 0.05, 0.01, 0.005, 0.001, 'ct1', 'ct2', 'ct3']
-    asymmetry = 0.1
-    shortcut = False  # , True]
-    bandwidth_mmd = 0
-    n_h = 100  # [20, 30, 40, 50]
-    # ['inputweights', 'grad', 'gradloss', 'hybrid_elm', 'elm']
-    asymfactor = 'sqrt'
-    # use_dif = True
-    loss = "adv"
-
-    mat = np.zeros((len(list(data.columns)), len(list(data.columns))))
-
-
-
-    list_out = Parallel(n_jobs=cdt_private.SETTINGS.NB_JOBS)(delayed(exec_sam_instance)(
-        idx % len(cdt_private.SETTINGS.GPU_LIST)) for idx in range(args.nruns))
-
-    sys.stdout.flush()
-    sys.stderr.flush()
-
-    W = list_out[0]
-    for w in list_out[1:]:
-        W += w
-    W /= args.nruns
-    print(W)
-    np.savetxt('{}/mat_SAM_{}_act-{}_lr-{}_tr-{}_l1-{}_l2-{}_alpha-{}_sht-{}_nh-{}_af-{}_e-{}.csv'.format(args.log, (args.data.split('/')[-1]).split('.')[0], str(activation_function).split(
-        '.')[-1].split("'")[0], activation_function, learning_rate, type_regul, regul, asymmetry, bandwidth_mmd, shortcut, n_h, asymfactor, 'res'), W, delimiter=",")
-    # W_max = W - W.transpose()
-    # W_max[W_max < 0] = 0
-    W_max = np.zeros((W.shape[0], W.shape[1]))
-    for i in range(W.shape[0]):
-        for j in range(W.shape[1]):
-            if(W[i][j] > W[j][i]):
-                W_max[i][j] = W[i][j]
-    # print(W_max)
-
-    g = cdt_private.DirectedGraph(pd.DataFrame(
-        W_max, columns=data.columns), adjacency_matrix=True)
-    ll = g.list_edges()
-    pd.DataFrame(ll, columns=['Cause', 'Effect', 'Weight']).to_csv(
-        '{}/adv_SAM_{}_act-{}_lr-{}_tr-{}_l1-{}_l2-{}_alpha-{}_sht-{}_nh-{}_af-{}_e-{}.csv'.format(args.log, (args.data.split('/')[-1]).split('.')[0], str(activation_function).split('.')[-1].split("'")[0], activation_function, learning_rate, type_regul, regul, asymmetry, bandwidth_mmd, shortcut, n_h, asymfactor, 'res'), index=False)
-
-    if target is not None:
-        aupr_scores = [precision_recall(g, target)[0][0]]
-
-        report = pd.DataFrame([[activation_function,
-                                learning_rate,
-                                type_regul,
-                                regul,
-                                asymmetry,
-                                bandwidth_mmd,
-                                shortcut,
-                                n_h,
-                                asymfactor]],
-                              columns=["activation_function",
-                                       "learning_rate",
-                                       "type_regul",
-                                       "regul",
-                                       "asymmetry",
-                                       "bandwidth_mmd",
-                                       "shortcut",
-                                       "n_h",
-                                       "asymfactor"])
-
-        report["AUPR"] = aupr_scores
-        report.to_csv("{}/sam-report-{}-{}.csv".format(args.log, args.data.split('/')
-                                                       [-1].split('.')[0], datetime.datetime.now().isoformat()), index=False)
-
-        print(aupr_scores)
+            W = list_out[0]
+            for w in list_out[1:]:
+                W += w
+            W /= nruns
+            return W
