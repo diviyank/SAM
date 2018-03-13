@@ -13,7 +13,7 @@ data = pd.read_csv("test/G5_v1_numdata.tab", sep="\t")
 output = sam.predict(data, nruns=12) # Recommended if high computational capability available, else nruns=1
 ```
 
-We highly recommand to use GPUs if possible. In the case of GPUs, here is an example for 2 GPUs:
+We highly recommand to use GPUs if possible. Here is an example for 2 GPUs:
 ```python
 import pandas as pd
 from sam import SAM
