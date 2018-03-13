@@ -12,3 +12,4 @@ sam = SAM()
 data = pd.read_csv("example_data.csv")
 output = sam.predict(data)
 ```
+In order to download the datasets used in the paper as well as the generators, download the submodule "datasets" (458MB). The acyclic graphs for the mechanisms _Linear, GP Add, GP Mix, Sigmoid Add and Sigmoid Mix_ were generated using the software provided at : https://github.com/bquast/ANM/tree/master/codeANM
