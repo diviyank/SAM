@@ -177,14 +177,15 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     verbose = kwargs.get('verbose', True)
     regul_param = kwargs.get('regul_param', 0.1)
     dnh = kwargs.get('dnh', None)
-
     plot = kwargs.get("plot", False)
     plot_generated_pair = kwargs.get("plot_generated_pair", False)
 
     d_str = "Epoch: {} -- Disc: {} -- Gen: {} -- L1: {}"
-
-    list_nodes = list(df_data.columns)
-    df_data = (df_data[list_nodes]).as_matrix()
+    try:
+        list_nodes = list(df_data.columns)
+        df_data = (df_data[list_nodes]).as_matrix()
+    except AttributeError:
+        list_nodes = list(range(df_data.shape[1]))
     data = df_data.astype('float32')
     data = th.from_numpy(data)
     if batch_size == -1:
@@ -193,17 +194,11 @@ def run_SAM(df_data, skeleton=None, **kwargs):
 
     # Get the list of indexes to ignore
     if skeleton is not None:
-        connections = []
-        for idx, i in enumerate(list_nodes):
-            connections.append([list_nodes.index(j)
-                                for j in skeleton.dict_nw()[i]])
-
-        zero_components = [
-            [i for i in range(cols) if i not in j] for j in connections]
-
+        zero_components = [[] for i in range(cols)]
+        for i, j in zip(*((1-skeleton).nonzero())):
+            zero_components[j].append(i)
     else:
         zero_components = [[i] for i in range(cols)]
-
     sam = SAM_generators((rows, cols), zero_components, batch_norm=True, **kwargs)
 
     # Begin UGLY
@@ -276,8 +271,8 @@ def run_SAM(df_data, skeleton=None, **kwargs):
                 gen_losses.append(criterion(disc_output, true_variable))
 
             true_output = discriminator_sam(batch)
-            adv_loss = sum(disc_losses) + \
-                criterion(true_output, true_variable) * cols
+            adv_loss = sum(disc_losses)/cols + \
+                criterion(true_output, true_variable)
             gen_loss = sum(gen_losses)
 
             adv_loss.backward()
@@ -383,7 +378,7 @@ class SAM(object):
         super(SAM, self).__init__()
         self.lr = lr
         self.dlr = dlr
-        self.l1 = l1,
+        self.l1 = l1
         self.nh = nh
         self.dnh = dnh
         self.train = train_epochs
@@ -408,22 +403,17 @@ class SAM(object):
         :return: Adjacency matrix (A) of the graph estimated by SAM,
                 A[i,j] is the term of the ith variable for the jth generator.
         """
-        def exec_sam_instance(gpuno=0):
-            return run_SAM(data, skeleton=skeleton, lr_gen=self.lr, lr_disc=self.dlr,
-                           regul_param=self.l1, nh=self.nh, dnh=self.dnh,
-                           gpu=bool(gpus), gpu_no=gpuno, train_epochs=self.train,
-                           test_epochs=self.test, batch_size=self.batchsize,
-                           plot=plot, verbose=verbose)
+        list_out = Parallel(n_jobs=njobs)(delayed(run_SAM)(data,
+                                                           skeleton=skeleton,
+                                                           lr_gen=self.lr, lr_disc=self.dlr,
+                                                           regul_param=self.l1, nh=self.nh, dnh=self.dnh,
+                                                           gpu=bool(gpus), train_epochs=self.train,
+                                                           test_epochs=self.test, batch_size=self.batchsize,
+                                                           plot=plot, verbose=verbose, gpu_no=idx % max(gpus, 1))
+                                          for idx in range(nruns))
 
-        assert nruns > 0
-        if nruns == 1:
-            return exec_sam_instance()
-        else:
-            list_out = Parallel(n_jobs=njobs)(delayed(exec_sam_instance)(
-                                idx % gpus) for idx in range(nruns))
-
-            W = list_out[0]
-            for w in list_out[1:]:
-                W += w
-            W /= nruns
-            return W
+        W = list_out[0]
+        for w in list_out[1:]:
+            W += w
+        W /= nruns
+        return W
