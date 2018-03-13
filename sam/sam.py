@@ -393,7 +393,7 @@ class SAM(object):
         :param skeleton: A priori knowledge about the causal relationships as an adjacency matrix.
                          Can be fed either directed or undirected links.
         :param nruns: Number of runs to be made for causal estimation.
-                      Recommended: >5 for optimal performance.
+                      Recommended: >=12 for optimal performance.
         :param njobs: Numbers of jobs to be run in Parallel.
                       Recommended: 1 if no GPU available, 2*number of GPUs else.
         :param gpus: Number of available GPUs for the algorithm.
