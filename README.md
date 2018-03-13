@@ -9,9 +9,19 @@ In order to use SAM:
 import pandas as pd
 from sam import SAM
 sam = SAM()
-data = pd.read_csv("datasets/graph_train/G5_v1_numdata.tab", sep="\t")
+data = pd.read_csv("test/G5_v1_numdata.tab", sep="\t")
 output = sam.predict(data, nruns=12) # Recommended if high computational capability available, else nruns=1
 ```
+
+We highly recommand to use GPUs if possible. In the case of GPUs, here is an example for 2 GPUs:
+```python
+import pandas as pd
+from sam import SAM
+sam = SAM()
+data = pd.read_csv("test/G5_v1_numdata.tab", sep="\t")
+output = sam.predict(data, nruns=12, gpus=2, njobs=4) # As the model is small, we recommand using 2 jobs on each GPU
+```
+
 
 In order to download the datasets used in the paper as well as the generators, download the submodule "datasets" (458MB):
 ```
@@ -19,3 +29,4 @@ git submodule update --init
 ```
 
 The acyclic graphs for the mechanisms _Linear, GP Add, GP Mix, Sigmoid Add and Sigmoid Mix_ were generated using the software provided at : https://github.com/bquast/ANM/tree/master/codeANM
+
