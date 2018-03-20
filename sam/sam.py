@@ -180,13 +180,32 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     plot = kwargs.get("plot", False)
     plot_generated_pair = kwargs.get("plot_generated_pair", False)
 
+    lr_gen = kwargs.get('lr_gen', 0.1)
+
+    bootstrap_ratio = kwargs.get('bootstrap_ratio', 0.8)
+
+
     d_str = "Epoch: {} -- Disc: {} -- Gen: {} -- L1: {}"
     try:
         list_nodes = list(df_data.columns)
         df_data = (df_data[list_nodes]).as_matrix()
     except AttributeError:
         list_nodes = list(range(df_data.shape[1]))
-    data = df_data.astype('float32')
+
+
+    bootstrap_data = df_data.as_matrix()
+
+    nb_points = int(bootstrap_data.shape[0]*bootstrap_ratio)
+    p = np.random.permutation(bootstrap_data.shape[0])
+    bootstrap_data = bootstrap_data[p[:int(nb_points)], :]
+
+    for i in range(df_data.shape[1]):
+        column = bootstrap_data[:, i]
+        column = [np.random.choice(column[np.isfinite(column)]) if np.isnan(j) else j for j in column]
+        bootstrap_data[:, i] = column
+
+
+    data = bootstrap_data.astype('float32')
     data = th.from_numpy(data)
     if batch_size == -1:
         batch_size = data.shape[0]
@@ -230,6 +249,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     false_variable = Variable(
         th.zeros(batch_size, 1), requires_grad=False)
     causal_filters = th.zeros(data.shape[1], data.shape[1])
+    causal_gradients = th.zeros(data.shape[1], data.shape[1])
 
     def fill_nan(mat):
         mat[mat.ne(mat)] = 0
@@ -239,6 +259,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
         true_variable = true_variable.cuda(gpu_no)
         false_variable = false_variable.cuda(gpu_no)
         causal_filters = causal_filters.cuda(gpu_no)
+        causal_gradients = causal_gradients.cuda(gpu_no)
 
     data_iterator = DataLoader(data, batch_size=batch_size, shuffle=True)
 
@@ -293,9 +314,15 @@ def run_SAM(df_data, skeleton=None, **kwargs):
                                                   l1_reg.cpu().data[0]))
             loss.backward()
 
+
+            gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), data).sum(dim=0) for i in range(cols)], 1)
+
+
             # STORE ASSYMETRY values for output
             if epoch > train_epochs:
                 causal_filters.add_(filters.data)
+                causal_gradients.add_(gradients.data)
+
             g_optimizer.step()
 
             if plot and i_batch == 0:
@@ -356,7 +383,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
 
                 plt.pause(0.01)
 
-    return causal_filters.div_(test_epochs).cpu().numpy()
+    return causal_filters.div_(test_epochs).cpu().numpy(), causal_gradients.div_(test_epochs).cpu().numpy()
 
 
 class SAM(object):
@@ -386,7 +413,7 @@ class SAM(object):
         self.batchsize = batchsize
 
     def predict(self, data, skeleton=None, nruns=6, njobs=1, gpus=0, verbose=True,
-                plot=False, plot_generated_pair=False, return_list_results = False):
+                plot=False, plot_generated_pair=False, return_list_results = False, bootstrap_ratio = 0.8):
         """Execute SAM on a dataset given a skeleton or not.
 
         :param data: Observational data for estimation of causal relationships by SAM
@@ -409,8 +436,12 @@ class SAM(object):
                                                            regul_param=self.l1, nh=self.nh, dnh=self.dnh,
                                                            gpu=bool(gpus), train_epochs=self.train,
                                                            test_epochs=self.test, batch_size=self.batchsize,
-                                                           plot=plot, verbose=verbose, gpu_no=idx % max(gpus, 1))
-                                          for idx in range(nruns))
+                                                           plot=plot, verbose=verbose, gpu_no=idx % max(gpus, 1), bootstrap_ratio = bootstrap_ratio)
+                                                           for idx in range(nruns))
+
+
+        print(list_out)
+
 
         if(return_list_results):
             return list_out
