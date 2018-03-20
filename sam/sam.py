@@ -386,7 +386,7 @@ class SAM(object):
         self.batchsize = batchsize
 
     def predict(self, data, skeleton=None, nruns=6, njobs=1, gpus=0, verbose=True,
-                plot=False, plot_generated_pair=False):
+                plot=False, plot_generated_pair=False, return_list_results = False):
         """Execute SAM on a dataset given a skeleton or not.
 
         :param data: Observational data for estimation of causal relationships by SAM
@@ -412,8 +412,11 @@ class SAM(object):
                                                            plot=plot, verbose=verbose, gpu_no=idx % max(gpus, 1))
                                           for idx in range(nruns))
 
-        W = list_out[0]
-        for w in list_out[1:]:
-            W += w
-        W /= nruns
-        return W
+        if(return_list_results):
+            return list_out
+        else:
+            W = list_out[0]
+            for w in list_out[1:]:
+                W += w
+            W /= nruns
+            return W
