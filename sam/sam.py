@@ -10,6 +10,7 @@ from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from matplotlib import pyplot as plt
 from joblib import Parallel, delayed
+import numpy as np
 
 
 class CNormalized_Linear(th.nn.Module):
@@ -184,7 +185,6 @@ def run_SAM(df_data, skeleton=None, **kwargs):
 
     bootstrap_ratio = kwargs.get('bootstrap_ratio', 0.8)
 
-
     d_str = "Epoch: {} -- Disc: {} -- Gen: {} -- L1: {}"
     try:
         list_nodes = list(df_data.columns)
@@ -192,8 +192,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     except AttributeError:
         list_nodes = list(range(df_data.shape[1]))
 
-
-    bootstrap_data = df_data.as_matrix()
+    bootstrap_data = df_data
 
     nb_points = int(bootstrap_data.shape[0]*bootstrap_ratio)
     p = np.random.permutation(bootstrap_data.shape[0])
@@ -203,7 +202,6 @@ def run_SAM(df_data, skeleton=None, **kwargs):
         column = bootstrap_data[:, i]
         column = [np.random.choice(column[np.isfinite(column)]) if np.isnan(j) else j for j in column]
         bootstrap_data[:, i] = column
-
 
     data = bootstrap_data.astype('float32')
     data = th.from_numpy(data)
@@ -266,7 +264,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     # TRAIN
     for epoch in range(train_epochs + test_epochs):
         for i_batch, batch in enumerate(data_iterator):
-            batch = Variable(batch)
+            batch = Variable(batch, requires_grad=True)
             batch_vectors = [batch[:, [i]] for i in range(cols)]
 
             g_optimizer.zero_grad()
@@ -274,6 +272,9 @@ def run_SAM(df_data, skeleton=None, **kwargs):
 
             # Train the discriminator
             generated_variables = sam(batch)
+
+            # gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), batch).sum(dim=0) for i in range(cols)], 1)
+
             disc_losses = []
             gen_losses = []
 
@@ -312,11 +313,10 @@ def run_SAM(df_data, skeleton=None, **kwargs):
                                                   gen_loss.cpu(
                                                   ).data[0] / cols,
                                                   l1_reg.cpu().data[0]))
-            loss.backward()
+            loss.backward(retain_graph=True)
 
-
-            gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), data).sum(dim=0) for i in range(cols)], 1)
-
+            gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), batch)[0].sum(dim=0) for i in range(cols)], 1)
+            print(gradients)
 
             # STORE ASSYMETRY values for output
             if epoch > train_epochs:
@@ -441,7 +441,6 @@ class SAM(object):
 
 
         print(list_out)
-
 
         if(return_list_results):
             return list_out
