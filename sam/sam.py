@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from matplotlib import pyplot as plt
 from joblib import Parallel, delayed
 import numpy as np
-
+from sklearn.preprocessing import scale
 
 class CNormalized_Linear(th.nn.Module):
     """Linear layer with column-wise normalized input matrix."""
@@ -203,6 +203,8 @@ def run_SAM(df_data, skeleton=None, **kwargs):
         column = [np.random.choice(column[np.isfinite(column)]) if np.isnan(j) else j for j in column]
         bootstrap_data[:, i] = column
 
+    bootstrap_data = scale(bootstrap_data)
+
     data = bootstrap_data.astype('float32')
     data = th.from_numpy(data)
     if batch_size == -1:
@@ -315,11 +317,11 @@ def run_SAM(df_data, skeleton=None, **kwargs):
                                                   l1_reg.cpu().data[0]))
             loss.backward(retain_graph=True)
 
-            gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), batch)[0].sum(dim=0) for i in range(cols)], 1)
-            print(gradients)
+            
 
             # STORE ASSYMETRY values for output
             if epoch > train_epochs:
+                gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), batch)[0].sum(dim=0) for i in range(cols)], 1)
                 causal_filters.add_(filters.data)
                 causal_gradients.add_(gradients.data)
 
@@ -440,7 +442,7 @@ class SAM(object):
                                                            for idx in range(nruns))
 
 
-        print(list_out)
+        
 
         if(return_list_results):
             return list_out
