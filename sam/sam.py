@@ -218,7 +218,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
             zero_components[j].append(i)
     else:
         zero_components = [[i] for i in range(cols)]
-    sam = SAM_generators((rows, cols), zero_components, batch_norm=True, **kwargs)
+    sam = SAM_generators((rows, cols), zero_components, batch_norm=False, **kwargs)
 
     # Begin UGLY
     activation_function = kwargs.get('activation_function', th.nn.Tanh)
