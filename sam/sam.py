@@ -231,10 +231,6 @@ def run_SAM(df_data, skeleton=None, **kwargs):
         th.zeros(batch_size, 1), requires_grad=False)
     causal_filters = th.zeros(data.shape[1], data.shape[1])
 
-    def fill_nan(mat):
-        mat[mat.ne(mat)] = 0
-        return mat
-
     if gpu:
         true_variable = true_variable.cuda(gpu_no)
         false_variable = false_variable.cuda(gpu_no)
