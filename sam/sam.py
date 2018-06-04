@@ -140,6 +140,7 @@ class SAM_generators(th.nn.Module):
         rows, self.cols = data_shape
 
         # building the computation graph
+        
         self.noise = [Variable(th.FloatTensor(batch_size, 1))
                       for i in range(self.cols)]
         if gpu:
@@ -203,10 +204,10 @@ def run_SAM(df_data, skeleton=None, **kwargs):
         column = [np.random.choice(column[np.isfinite(column)]) if np.isnan(j) else j for j in column]
         bootstrap_data[:, i] = column
 
-    bootstrap_data = scale(bootstrap_data)
-
-    data = bootstrap_data.astype('float32')
+    data = scale(bootstrap_data)
+    data = data.astype('float32')
     data = th.from_numpy(data)
+
     if batch_size == -1:
         batch_size = data.shape[0]
     rows, cols = data.size()
@@ -249,7 +250,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
     false_variable = Variable(
         th.zeros(batch_size, 1), requires_grad=False)
     causal_filters = th.zeros(data.shape[1], data.shape[1])
-    causal_gradients = th.zeros(data.shape[1], data.shape[1])
+    causal_gradients = th.zeros(data.shape[0], data.shape[1], data.shape[1])
 
     def fill_nan(mat):
         mat[mat.ne(mat)] = 0
@@ -261,7 +262,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
         causal_filters = causal_filters.cuda(gpu_no)
         causal_gradients = causal_gradients.cuda(gpu_no)
 
-    data_iterator = DataLoader(data, batch_size=batch_size, shuffle=True)
+    data_iterator = DataLoader(data, batch_size=batch_size, shuffle=False)
 
     # TRAIN
     for epoch in range(train_epochs + test_epochs):
@@ -275,7 +276,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
             # Train the discriminator
             generated_variables = sam(batch)
 
-            # gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), batch).sum(dim=0) for i in range(cols)], 1)
+            
 
             disc_losses = []
             gen_losses = []
@@ -321,7 +322,7 @@ def run_SAM(df_data, skeleton=None, **kwargs):
 
             # STORE ASSYMETRY values for output
             if epoch > train_epochs:
-                gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), batch)[0].sum(dim=0) for i in range(cols)], 1)
+                gradients = th.stack([th.autograd.grad(generated_variables[i].sum(), batch)[0] for i in range(cols)], 2)
                 causal_filters.add_(filters.data)
                 causal_gradients.add_(gradients.data)
 
@@ -385,7 +386,38 @@ def run_SAM(df_data, skeleton=None, **kwargs):
 
                 plt.pause(0.01)
 
-    return causal_filters.div_(test_epochs).cpu().numpy(), causal_gradients.div_(test_epochs).cpu().numpy()
+    grad_matrix = causal_gradients.div_(test_epochs).cpu().numpy()
+
+    p = len(list_nodes)
+    grad_low = np.zeros((p,p))
+    grad_med = np.zeros((p,p))
+    grad_top = np.zeros((p,p))
+    grad_all = np.zeros((p,p))
+
+    for i in range(len(list_nodes)):
+        for j in range(len(list_nodes)):
+
+            std_i = np.std(bootstrap_data[:, i])
+            std_j = np.std(bootstrap_data[:, j])
+
+            n = bootstrap_data.shape[0]
+            grad_vect = np.zeros((n,2))
+
+            grad_vect[:,0] = bootstrap_data[:, i]
+            grad_vect[:,1] = grad_matrix[:,i,j] 
+
+
+            grad_vect = grad_vect[grad_vect[:,0].argsort()]
+
+            d= int(n/3)
+            grad_low[i,j] = np.mean(grad_vect[:d,1])*std_j/std_i            
+            grad_med[i,j] = np.mean(grad_vect[d:2*d,1])*std_j/std_i 
+            grad_top[i,j] = np.mean(grad_vect[2*d:,1])*std_j/std_i
+            grad_all[i,j] = np.mean(grad_vect[:,1])*std_j/std_i
+
+
+
+    return causal_filters.div_(test_epochs).cpu().numpy(), grad_low, grad_med, grad_top, grad_all
 
 
 class SAM(object):
