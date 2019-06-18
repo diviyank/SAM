@@ -3,369 +3,289 @@
 Author: Diviyan Kalainathan, Olivier Goudet
 Date: 09/3/2018
 """
-
-import math
+import os
+import numpy as np
 import torch as th
-from torch.autograd import Variable
+import pandas as pd
 from torch.utils.data import DataLoader
-from matplotlib import pyplot as plt
-from joblib import Parallel, delayed
-
-
-class CNormalized_Linear(th.nn.Module):
-    """Linear layer with column-wise normalized input matrix."""
-
-    def __init__(self, in_features, out_features, bias=False):
-        """Initialize the layer."""
-        super(CNormalized_Linear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = th.nn.Parameter(th.Tensor(out_features, in_features))
-        if bias:
-            self.bias = th.nn.Parameter(th.Tensor(out_features))
-        else:
-            self.register_parameter('bias', None)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        """Reset the parameters."""
-        stdv = 1. / math.sqrt(self.weight.size(1))
-        self.weight.data.uniform_(-stdv, stdv)
-        if self.bias is not None:
-            self.bias.data.uniform_(-stdv, stdv)
-
-    def forward(self, input):
-        """Feed-forward through the network."""
-        return th.nn.functional.linear(input, self.weight.div(self.weight.pow(2).sum(0).sqrt()))
-
-    def __repr__(self):
-        """For print purposes."""
-        return self.__class__.__name__ + '(' \
-            + 'in_features=' + str(self.in_features) \
-            + ', out_features=' + str(self.out_features) \
-            + ', bias=' + str(self.bias is not None) + ')'
-
-
-class SAM_discriminator(th.nn.Module):
-    """Discriminator for the SAM model."""
-
-    def __init__(self, sizes, zero_components=[], **kwargs):
-        """Init the SAM discriminator."""
-        super(SAM_discriminator, self).__init__()
-        self.sht = kwargs.get('shortcut', False)
-        activation_function = kwargs.get('activation_function', th.nn.ReLU)
-        activation_argument = kwargs.get('activation_argument', None)
-        batch_norm = kwargs.get("batch_norm", False)
-        dropout = kwargs.get("dropout", 0.)
-
-        layers = []
-
-        for i, j in zip(sizes[:-2], sizes[1:-1]):
-            layers.append(th.nn.Linear(i, j))
-            if batch_norm:
-                layers.append(th.nn.BatchNorm1d(j))
-            if dropout != 0.:
-                layers.append(th.nn.Dropout(p=dropout))
-            if activation_argument is None:
-                layers.append(activation_function())
-            else:
-                layers.append(activation_function(activation_argument))
-
-        layers.append(th.nn.Linear(sizes[-2], sizes[-1]))
-        self.layers = th.nn.Sequential(*layers)
-        # print(self.layers)
-
-    def forward(self, x):
-        """Feed-forward the model."""
-        return self.layers(x)
-
-
-class SAM_block(th.nn.Module):
-    """SAM-Block: conditional generator.
-
-    Generates one variable while selecting the parents. Uses filters to do so.
-    One fixed filter and one with parameters on order to keep a fixed skeleton.
-    """
-
-    def __init__(self, sizes, zero_components=[], **kwargs):
-        """Initialize a generator."""
-        super(SAM_block, self).__init__()
-        gpu = kwargs.get('gpu', False)
-        gpu_no = kwargs.get('gpu_no', 0)
-        activation_function = kwargs.get('activation_function', th.nn.Tanh)
-        activation_argument = kwargs.get('activation_argument', None)
-        batch_norm = kwargs.get("batch_norm", False)
-        layers = []
-
-        for i, j in zip(sizes[:-2], sizes[1:-1]):
-            layers.append(CNormalized_Linear(i, j))
-            if batch_norm:
-                layers.append(th.nn.BatchNorm1d(j))
-            if activation_argument is None:
-                layers.append(activation_function())
-            else:
-                layers.append(activation_function(activation_argument))
-
-        layers.append(th.nn.Linear(sizes[-2], sizes[-1]))
-        self.layers = th.nn.Sequential(*layers)
-
-        # Filtering the unconnected nodes.
-        self._filter = th.ones(1, sizes[0])
-        for i in zero_components:
-            self._filter[:, i].zero_()
-
-        self._filter = Variable(self._filter, requires_grad=False)
-        self.fs_filter = th.nn.Parameter(self._filter.data)
-
-        if gpu:
-            self._filter = self._filter.cuda(gpu_no)
-
-    def forward(self, x):
-        """Feed-forward the model."""
-        return self.layers(x * (self._filter *
-                                self.fs_filter).expand_as(x))
+from tqdm import tqdm
+from sklearn.preprocessing import scale
+from .utils.linear3d import Linear3D
+from .utils.graph import MatrixSampler, notears_constr
+from .utils.batchnorm import ChannelBatchNorm1d
+from .utils.parlib import parallel_run
 
 
 class SAM_generators(th.nn.Module):
     """Ensemble of all the generators."""
 
-    def __init__(self, data_shape, zero_components, nh=200, batch_size=-1, **kwargs):
+    def __init__(self, data_shape, nh, skeleton=None, cat_sizes=None, linear=False):
         """Init the model."""
         super(SAM_generators, self).__init__()
-        if batch_size == -1:
-            batch_size = data_shape[0]
-        gpu = kwargs.get('gpu', False)
-        gpu_no = kwargs.get('gpu_no', 0)
-        rows, self.cols = data_shape
+        layers = []
+        # Building skeleton
+        self.sizes = cat_sizes
+        self.linear = linear
 
-        # building the computation graph
-        self.noise = [Variable(th.FloatTensor(batch_size, 1))
-                      for i in range(self.cols)]
-        if gpu:
-            self.noise = [i.cuda(gpu_no) for i in self.noise]
-        self.blocks = th.nn.ModuleList()
+        nb_vars = data_shape[1]
+        self.nb_vars = nb_vars
+        if skeleton is None:
+            skeleton = 1 - th.eye(nb_vars + 1, nb_vars)  # 1 row for noise
+        else:
+            skeleton = th.cat([th.Tensor(skeleton), th.ones(1, nb_vars)], 1)
+        if linear:
+            self.input_layer = Linear3D((nb_vars, nb_vars + 1, 1))
+        else:
+            self.input_layer = Linear3D((nb_vars, nb_vars + 1, nh))
+            layers.append(ChannelBatchNorm1d(nb_vars, nh))
+            layers.append(th.nn.Tanh())
+            self.output_layer = Linear3D((nb_vars, nh, 1))
 
-        # Init all the blocks
-        for i in range(self.cols):
-            self.blocks.append(SAM_block(
-                [self.cols + 1, nh, 1], zero_components[i], **kwargs))
+        self.layers = th.nn.Sequential(*layers)
+        self.register_buffer('skeleton', skeleton)
 
-    def forward(self, x):
-        """Feed-forward the model."""
-        for i in self.noise:
-            i.data.normal_()
+    def forward(self, data, noise, adj_matrix, drawn_neurons=None):
+        """Forward through all the generators."""
 
-        self.generated_variables = [self.blocks[i](
-            th.cat([x, self.noise[i]], 1)) for i in range(self.cols)]
-        return self.generated_variables
+        if self.linear:
+            output = self.input_layer(data, noise, adj_matrix * self.skeleton)
+        else:
+            output = self.output_layer(self.layers(self.input_layer(data,
+                                                                    noise,
+                                                                    adj_matrix * self.skeleton)),
+                                       drawn_neurons)
+
+        return output.squeeze(2)
+
+    def reset_parameters(self):
+        if not self.linear:
+            self.output_layer.reset_parameters()
+            for layer in self.layers:
+                if hasattr(layer, 'reset_parameters'):
+                    layer.reset_parameters()
+        self.input_layer.reset_parameters()
 
 
-def run_SAM(df_data, skeleton=None, **kwargs):
-    """Execute the SAM model.
+class SAM_discriminator(th.nn.Module):
+    """SAM discriminator."""
 
-    :param df_data:
-    """
-    gpu = kwargs.get('gpu', False)
-    gpu_no = kwargs.get('gpu_no', 0)
+    def __init__(self, nfeatures, dnh, hlayers=2, mask=None):
+        super(SAM_discriminator, self).__init__()
+        self.nfeatures = nfeatures
+        layers = []
+        layers.append(th.nn.Linear(nfeatures, dnh))
+        layers.append(th.nn.BatchNorm1d(dnh))
+        layers.append(th.nn.LeakyReLU(.2))
+        for i in range(hlayers-1):
+            layers.append(th.nn.Linear(dnh, dnh))
+            layers.append(th.nn.BatchNorm1d(dnh))
+            layers.append(th.nn.LeakyReLU(.2))
 
-    train_epochs = kwargs.get('train_epochs', 1000)
-    test_epochs = kwargs.get('test_epochs', 1000)
-    batch_size = kwargs.get('batch_size', -1)
+        layers.append(th.nn.Linear(dnh, 1))
+        self.layers = th.nn.Sequential(*layers)
 
-    lr_gen = kwargs.get('lr_gen', 0.1)
-    lr_disc = kwargs.get('lr_disc', lr_gen)
-    verbose = kwargs.get('verbose', True)
-    regul_param = kwargs.get('regul_param', 0.1)
-    dnh = kwargs.get('dnh', None)
-    plot = kwargs.get("plot", False)
-    plot_generated_pair = kwargs.get("plot_generated_pair", False)
+        if mask is None:
+            mask = th.eye(nfeatures, nfeatures)
+        self.register_buffer("mask", mask.unsqueeze(0))
 
-    d_str = "Epoch: {} -- Disc: {} -- Gen: {} -- L1: {}"
-    try:
-        list_nodes = list(df_data.columns)
-        df_data = (df_data[list_nodes]).as_matrix()
-    except AttributeError:
-        list_nodes = list(range(df_data.shape[1]))
-    data = df_data.astype('float32')
-    data = th.from_numpy(data)
+    def forward(self, input, obs_data=None):
+        if obs_data is not None:
+            return [self.layers(i) for i in th.unbind(obs_data.unsqueeze(1) * (1 - self.mask)
+                                                      + input.unsqueeze(1) * self.mask, 1)]
+        else:
+            return self.layers(input)
+
+    def reset_parameters(self):
+        for layer in self.layers:
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
+
+
+def run_SAM(in_data, skeleton=None, device="cpu",
+            train=5000, test=1000,
+            batch_size=-1, lr_gen=.001,
+            lr_disc=.01, lambda1=0.001, lambda2=0.0000001, nh=None, dnh=None,
+            verbose=True, losstype="fgan",
+            dagstart=0, dagloss=False,
+            dagpenalization=0.05, dagpenalization_increase=0.0,
+            dag_threshold=0.5,
+            linear=False, hlayers=2):
+
+    list_nodes = list(in_data.columns)
+    data = scale(in_data[list_nodes].values)
+    nb_var = len(list_nodes)
+    data = data.astype('float32')
+    data = th.from_numpy(data).to(device)
     if batch_size == -1:
         batch_size = data.shape[0]
     rows, cols = data.size()
-
     # Get the list of indexes to ignore
     if skeleton is not None:
-        zero_components = [[] for i in range(cols)]
-        for i, j in zip(*((1-skeleton).nonzero())):
-            zero_components[j].append(i)
+        skeleton = th.from_numpy(skeleton.astype('float32'))
+
+    sam = SAM_generators((batch_size, cols), nh, skeleton=skeleton,
+                         linear=linear).to(device)
+
+    sam.reset_parameters()
+    g_optimizer = th.optim.Adam(list(sam.parameters()), lr=lr_gen)
+
+    if losstype != "mse":
+        discriminator = SAM_discriminator(cols, dnh, hlayers).to(device)
+        discriminator.reset_parameters()
+        d_optimizer = th.optim.Adam(discriminator.parameters(), lr=lr_disc)
+        criterion = th.nn.BCEWithLogitsLoss()
     else:
-        zero_components = [[i] for i in range(cols)]
-    sam = SAM_generators((rows, cols), zero_components, batch_norm=True, **kwargs)
+        criterion = th.nn.MSELoss()
+        disc_loss = th.zeros(1)
 
-    # Begin UGLY
-    activation_function = kwargs.get('activation_function', th.nn.Tanh)
-    try:
-        del kwargs["activation_function"]
-    except KeyError:
-        pass
-    discriminator_sam = SAM_discriminator(
-        [cols, dnh, dnh, 1], batch_norm=True,
-        activation_function=th.nn.LeakyReLU,
-        activation_argument=0.2, **kwargs)
-    kwargs["activation_function"] = activation_function
-    # End of UGLY
+    graph_sampler = MatrixSampler(nb_var, mask=skeleton,
+                                  gumble=False).to(device)
+    graph_sampler.weights.data.fill_(2)
+    graph_optimizer = th.optim.Adam(graph_sampler.parameters(), lr=lr_gen)
 
-    if gpu:
-        sam = sam.cuda(gpu_no)
-        discriminator_sam = discriminator_sam.cuda(gpu_no)
-        data = data.cuda(gpu_no)
+    if not linear:
+        neuron_sampler = MatrixSampler((nh, nb_var), mask=False,
+                                       gumble=True).to(device)
+        neuron_optimizer = th.optim.Adam(list(neuron_sampler.parameters()),
+                                         lr=lr_gen)
 
-    # Select parameters to optimize : ignore the non connected nodes
-    criterion = th.nn.BCEWithLogitsLoss()
-    g_optimizer = th.optim.Adam(sam.parameters(), lr=lr_gen)
-    d_optimizer = th.optim.Adam(
-        discriminator_sam.parameters(), lr=lr_disc)
+    _true = th.ones(1).to(device)
+    _false = th.zeros(1).to(device)
+    output = th.zeros(nb_var, nb_var).to(device)
 
-    true_variable = Variable(
-        th.ones(batch_size, 1), requires_grad=False)
-    false_variable = Variable(
-        th.zeros(batch_size, 1), requires_grad=False)
-    causal_filters = th.zeros(data.shape[1], data.shape[1])
+    noise = th.randn(batch_size, nb_var).to(device)
+    noise_row = th.ones(1, nb_var).to(device)
+    data_iterator = DataLoader(data, batch_size=batch_size,
+                               shuffle=True, drop_last=True)
 
-    if gpu:
-        true_variable = true_variable.cuda(gpu_no)
-        false_variable = false_variable.cuda(gpu_no)
-        causal_filters = causal_filters.cuda(gpu_no)
-
-    data_iterator = DataLoader(data, batch_size=batch_size, shuffle=True)
-
-    # TRAIN
-    for epoch in range(train_epochs + test_epochs):
+    # RUN
+    if verbose:
+        pbar = tqdm(range(train + test))
+    else:
+        pbar = range(train+test)
+    for epoch in pbar:
         for i_batch, batch in enumerate(data_iterator):
-            batch = Variable(batch)
-            batch_vectors = [batch[:, [i]] for i in range(cols)]
-
             g_optimizer.zero_grad()
-            d_optimizer.zero_grad()
+            graph_optimizer.zero_grad()
+
+            if losstype != "mse":
+                d_optimizer.zero_grad()
+
+            if not linear:
+                neuron_optimizer.zero_grad()
 
             # Train the discriminator
-            generated_variables = sam(batch)
-            disc_losses = []
-            gen_losses = []
 
-            for i in range(cols):
-                generator_output = th.cat([v for c in [batch_vectors[: i], [
-                    generated_variables[i]],
-                    batch_vectors[i + 1:]] for v in c], 1)
-                # 1. Train discriminator on fake
-                disc_output_detached = discriminator_sam(
-                    generator_output.detach())
-                disc_output = discriminator_sam(generator_output)
-                disc_losses.append(
-                    criterion(disc_output_detached, false_variable))
+            if not epoch > train:
+                drawn_graph = graph_sampler()
+                if not linear:
+                    drawn_neurons = neuron_sampler()
+                else:
+                    drawn_neurons = None
+            noise.normal_()
+            generated_variables = sam(batch, noise,
+                                      th.cat([drawn_graph, noise_row], 0),
+                                      drawn_neurons)
 
-                # 2. Train the generator :
-                gen_losses.append(criterion(disc_output, true_variable))
+            if losstype == "mse":
+                gen_loss = criterion(generated_variables, batch)
+            else:
+                disc_vars_d = discriminator(generated_variables.detach(), batch)
+                disc_vars_g = discriminator(generated_variables, batch)
+                true_vars_disc = discriminator(batch)
 
-            true_output = discriminator_sam(batch)
-            adv_loss = sum(disc_losses)/cols + \
-                criterion(true_output, true_variable)
-            gen_loss = sum(gen_losses)
+                if losstype == "gan":
+                    disc_loss = sum([criterion(gen, _false.expand_as(gen)) for gen in disc_vars_d]) / nb_var \
+                                     + criterion(true_vars_disc, _true.expand_as(true_vars_disc))
+                    # Gen Losses per generator: multiply py the number of channels
+                    gen_loss = sum([criterion(gen,
+                                              _true.expand_as(gen))
+                                    for gen in disc_vars_g])
+                elif losstype == "fgan":
 
-            adv_loss.backward()
-            d_optimizer.step()
+                    disc_loss = sum([th.mean(th.exp(gen - 1)) for gen in disc_vars_d]) / nb_var - th.mean(true_vars_disc)
+                    gen_loss = -sum([th.mean(th.exp(gen - 1)) for gen in disc_vars_g])
 
-            # 3. Compute filter regularization
-            filters = th.stack(
-                [i.fs_filter[0, :-1].abs() for i in sam.blocks], 1)
-            l1_reg = regul_param * filters.sum()
-            loss = gen_loss + l1_reg
+                disc_loss.backward()
+                d_optimizer.step()
 
-            if verbose and epoch % 200 == 0 and i_batch == 0:
+            filters = graph_sampler.get_proba()
 
-                print(str(i) + " " + d_str.format(epoch,
-                                                  adv_loss.cpu().data[0],
-                                                  gen_loss.cpu(
-                                                  ).data[0] / cols,
-                                                  l1_reg.cpu().data[0]))
-            loss.backward()
+            struc_loss = lambda1*drawn_graph.sum()
 
-            # STORE ASSYMETRY values for output
-            if epoch > train_epochs:
-                causal_filters.add_(filters.data)
+            func_loss = 0 if linear else lambda2*drawn_neurons.sum()
+            regul_loss = struc_loss + func_loss
+
+            if dagloss and epoch > train * dagstart:
+                dag_constraint = notears_constr(filters*filters)
+                loss = gen_loss + regul_loss + (dagpenalization +
+                                                (epoch - train * dagstart)
+                                                * dagpenalization_increase) * dag_constraint
+            else:
+                loss = gen_loss + regul_loss
+            if verbose and epoch % 20 == 0 and i_batch == 0:
+                pbar.set_postfix(gen=gen_loss.item()/cols,
+                                 disc=disc_loss.item(),
+                                 regul_loss=regul_loss.item(),
+                                 tot=loss.item())
+
+            if epoch < train + test - 1:
+                loss.backward(retain_graph=True)
+            
+            if epoch >= train:
+                output.add_(filters.data)
+
             g_optimizer.step()
+            graph_optimizer.step()
+            if not linear:
+                neuron_optimizer.step()
 
-            if plot and i_batch == 0:
-                try:
-                    ax.clear()
-                    ax.plot(range(len(adv_plt)), adv_plt, "r-",
-                            linewidth=1.5, markersize=4,
-                            label="Discriminator")
-                    ax.plot(range(len(adv_plt)), gen_plt, "g-", linewidth=1.5,
-                            markersize=4, label="Generators")
-                    ax.plot(range(len(adv_plt)), l1_plt, "b-",
-                            linewidth=1.5, markersize=4,
-                            label="L1-Regularization")
-                    ax.plot(range(len(adv_plt)), asym_plt, "c-",
-                            linewidth=1.5, markersize=4,
-                            label="Assym penalization")
+    return output.div_(test).cpu().numpy()
 
-                    plt.legend()
 
-                    adv_plt.append(adv_loss.cpu().data[0])
-                    gen_plt.append(gen_loss.cpu().data[0] / cols)
-                    l1_plt.append(l1_reg.cpu().data[0])
-                    asym_plt.append(asymmetry_reg.cpu().data[0])
-                    plt.pause(0.0001)
-
-                except NameError:
-                    plt.ion()
-                    plt.figure()
-                    plt.xlabel("Epoch")
-                    plt.ylabel("Losses")
-
-                    plt.pause(0.0001)
-
-                    adv_plt = [adv_loss.cpu().data[0]]
-                    gen_plt = [gen_loss.cpu().data[0] / cols]
-                    l1_plt = [l1_reg.cpu().data[0]]
-
-            elif plot:
-                adv_plt.append(adv_loss.cpu().data[0])
-                gen_plt.append(gen_loss.cpu().data[0] / cols)
-                l1_plt.append(l1_reg.cpu().data[0])
-
-            if plot_generated_pair and epoch % 200 == 0:
-                if epoch == 0:
-                    plt.ion()
-                to_print = [[0, 1]]  # , [1, 0]]  # [2, 3]]  # , [11, 17]]
-                plt.clf()
-                for (i, j) in to_print:
-
-                    plt.scatter(generated_variables[i].data.cpu().numpy(
-                    ), batch.data.cpu().numpy()[:, j], label="Y -> X")
-                    plt.scatter(batch.data.cpu().numpy()[
-                        :, i], generated_variables[j].data.cpu().numpy(), label="X -> Y")
-
-                    plt.scatter(batch.data.cpu().numpy()[:, i], batch.data.cpu().numpy()[
-                        :, j], label="original data")
-                    plt.legend()
-
-                plt.pause(0.01)
-
-    return causal_filters.div_(test_epochs).cpu().numpy()
+def exec_sam_instance(data, skeleton=None, gpus=0,
+                      device='cpu', verbose=True, log=None,
+                      lr=0.001, dlr=0.01, lambda1=0.001, lambda2=0.0000001, nh=200, dnh=500,
+                      train=10000, test=1000, batchsize=-1,
+                      losstype="fgan", dagstart=0, dagloss=False,
+                      dagpenalization=0.001, dagpenalization_increase=0.0,
+                      dag_threshold=0.5, linear=False, hlayers=2):
+        out = run_SAM(data, skeleton=skeleton,
+                      device=device,lr_gen=lr, lr_disc=dlr,
+                      lambda1=lambda1, lambda2=lambda2,
+                      nh=nh, dnh=dnh,
+                      train=train,
+                      test=test, batch_size=batchsize,
+                      dagstart=dagstart,
+                      dagloss=dagloss,
+                      dagpenalization=dagpenalization,
+                      dagpenalization_increase=dagpenalization_increase,
+                      losstype=losstype,
+                      dag_threshold=dag_threshold,
+                      linear=linear,
+                      hlayers=hlayers
+                      )
+        if log is not None:
+            np.savetxt(log, out, delimiter=",")
+        return out
 
 
 class SAM(object):
     """Structural Agnostic Model."""
 
-    def __init__(self, lr=0.1, dlr=0.1, l1=0.1, nh=200, dnh=200,
-                 train_epochs=1000, test_epochs=1000, batchsize=-1):
+    def __init__(self, lr=0.001, dlr=0.01, lambda1=0.001, lambda2=0.0000001, nh=200, dnh=500,
+                 train_epochs=10000, test_epochs=1000, batchsize=-1,
+                 losstype="fgan", sampletype="sigmoidproba", initweight=0, dagstart=0, dagloss=False, dagpenalization=0.001,
+                 dagpenalization_increase=0.0, dag_threshold=0.5, linear=False, hlayers=2):
+
         """Init and parametrize the SAM model.
 
         :param lr: Learning rate of the generators
         :param dlr: Learning rate of the discriminator
         :param l1: L1 penalization on the causal filters
         :param nh: Number of hidden units in the generators' hidden layers
+           a
+           ((cols,cols)
         :param dnh: Number of hidden units in the discriminator's hidden layer$
         :param train_epochs: Number of training epochs
         :param test_epochs: Number of test epochs (saving and averaging the causal filters)
@@ -374,22 +294,31 @@ class SAM(object):
         super(SAM, self).__init__()
         self.lr = lr
         self.dlr = dlr
-        self.l1 = l1
+        self.lambda1 = lambda1
+        self.lambda2 = lambda2
         self.nh = nh
         self.dnh = dnh
         self.train = train_epochs
         self.test = test_epochs
         self.batchsize = batchsize
+        self.losstype = losstype
+        self.dagstart = dagstart
+        self.dagloss = dagloss
+        self.dagpenalization = dagpenalization
+        self.dagpenalization_increase = dagpenalization_increase
+        self.dag_threshold = dag_threshold
+        self.linear = linear
+        self.hlayers = hlayers
 
-    def predict(self, data, skeleton=None, nruns=6, njobs=1, gpus=0, verbose=True,
-                plot=False, plot_generated_pair=False, return_list_results=False):
+    def predict(self, data, skeleton=None, mixed_data=False, nruns=6, njobs=1,
+                gpus=0, verbose=True, log=None):
         """Execute SAM on a dataset given a skeleton or not.
 
         :param data: Observational data for estimation of causal relationships by SAM
         :param skeleton: A priori knowledge about the causal relationships as an adjacency matrix.
                          Can be fed either directed or undirected links.
         :param nruns: Number of runs to be made for causal estimation.
-                      Recommended: >=12 for optimal performance.
+                      Recommended: >5 for optimal performance.
         :param njobs: Numbers of jobs to be run in Parallel.
                       Recommended: 1 if no GPU available, 2*number of GPUs else.
         :param gpus: Number of available GPUs for the algorithm.
@@ -399,20 +328,54 @@ class SAM(object):
         :return: Adjacency matrix (A) of the graph estimated by SAM,
                 A[i,j] is the term of the ith variable for the jth generator.
         """
-        list_out = Parallel(n_jobs=njobs)(delayed(run_SAM)(data,
-                                                           skeleton=skeleton,
-                                                           lr_gen=self.lr, lr_disc=self.dlr,
-                                                           regul_param=self.l1, nh=self.nh, dnh=self.dnh,
-                                                           gpu=bool(gpus), train_epochs=self.train,
-                                                           test_epochs=self.test, batch_size=self.batchsize,
-                                                           plot=plot, verbose=verbose, gpu_no=idx % max(gpus, 1))
-                                          for idx in range(nruns))
-
-        if return_list_results:
-            return list_out
+        assert nruns > 0
+        if nruns == 1:
+            return run_SAM(data, skeleton=skeleton,
+                           lr_gen=self.lr,
+                           lr_disc=self.dlr,
+                           verbose=verbose,
+                           lambda1=self.lambda1, lambda2=self.lambda2,
+                           nh=self.nh, dnh=self.dnh,
+                           train=self.train,
+                           test=self.test, batch_size=self.batchsize,
+                           dagstart=self.dagstart,
+                           dagloss=self.dagloss,
+                           dagpenalization=self.dagpenalization,
+                           dagpenalization_increase=self.dagpenalization_increase,
+                           losstype=self.losstype,
+                           dag_threshold=self.dag_threshold,
+                           linear=self.linear,
+                           hlayers=self.hlayers,
+                           device='cuda:0' if gpus else 'cpu')
         else:
-            W = list_out[0]
-            for w in list_out[1:]:
-                W += w
-            W /= nruns
-            return W
+            list_out = []
+            if log is not None:
+                idx = 0
+                while os.path.isfile(log + str(idx)):
+                    list_out.append(np.loadtxt(log + str(idx), delimiter=","))
+                    idx += 1
+            results = parallel_run(run_SAM, data, skeleton=skeleton,
+                                   nruns=nruns-len(list_out),
+                                   njobs=njobs, gpus=gpus, lr_gen=self.lr,
+                                   lr_disc=self.dlr,
+                                   verbose=verbose,
+                                   lambda1=self.lambda1, lambda2=self.lambda2,
+                                   nh=self.nh, dnh=self.dnh,
+                                   train=self.train,
+                                   test=self.test, batch_size=self.batchsize,
+                                   dagstart=self.dagstart,
+                                   dagloss=self.dagloss,
+                                   dagpenalization=self.dagpenalization,
+                                   dagpenalization_increase=self.dagpenalization_increase,
+                                   losstype=self.losstype,
+                                   dag_threshold=self.dag_threshold,
+                                   linear=self.linear,
+                                   hlayers=self.hlayers)
+            list_out.extend(results)
+            list_out = [i for i in list_out if not np.isnan(i).any()]
+            try:
+                assert len(list_out) > 0
+            except AssertionError as e:
+                print("All solutions contain NaNs")
+                raise(e)
+            return sum(list_out)/len(list_out)

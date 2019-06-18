@@ -10,14 +10,14 @@ except ImportError:
 
 def setup_package():
     """Install the package."""
-    setup(name='sam',
+    setup(name='gsam',
           version='0.1',
-          description='Structural Agnostic Model',
-          url='https://github.com/Diviyan-Kalainathan/SAM',
+          description='Gumbel Softmax Structural Agnostic Model',
+          url='https://github.com/Diviyan-Kalainathan/gSAM',
           author='Diviyan Kalainathan',
           author_email='diviyan.kalainathan@lri.fr',
           license='Apache 2.0',
-          packages=['sam'])
+          packages=['gsam'])
 
 
 if __name__ == '__main__':

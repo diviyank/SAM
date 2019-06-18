@@ -1,5 +1,12 @@
 # SAM: Structural Agnostic Model, Causal Discovery and Penalized Adversarial Learning.
+This version is the new version of SAM, using structural gates and functional
+gates
+
 Code in PyTorch. Link to the paper: https://arxiv.org/abs/1803.04929
+
+The (OLD) code of SAM is available at
+https://github.com/Diviyan-Kalainathan/SAMv1
+The first version of the paper is available at https://arxiv.org/abs/1803.04929v1
 
 In order to use SAM:
 1. Install the package requirements with ```pip install -r requirements.txt```. For PyTorch visit: http://pytorch.org
