@@ -243,40 +243,40 @@ def run_SAM(in_data, skeleton=None, device="cpu",
     return output.div_(test).cpu().numpy()
 
 
-def exec_sam_instance(data, skeleton=None, gpus=0,
-                      device='cpu', verbose=True, log=None,
-                      lr=0.001, dlr=0.01, lambda1=0.001, lambda2=0.0000001, nh=200, dnh=500,
-                      train=10000, test=1000, batchsize=-1,
-                      losstype="fgan", dagstart=0, dagloss=False,
-                      dagpenalization=0.001, dagpenalization_increase=0.0,
-                      dag_threshold=0.5, linear=False, hlayers=2):
-        out = run_SAM(data, skeleton=skeleton,
-                      device=device,lr_gen=lr, lr_disc=dlr,
-                      lambda1=lambda1, lambda2=lambda2,
-                      nh=nh, dnh=dnh,
-                      train=train,
-                      test=test, batch_size=batchsize,
-                      dagstart=dagstart,
-                      dagloss=dagloss,
-                      dagpenalization=dagpenalization,
-                      dagpenalization_increase=dagpenalization_increase,
-                      losstype=losstype,
-                      dag_threshold=dag_threshold,
-                      linear=linear,
-                      hlayers=hlayers
-                      )
-        if log is not None:
-            np.savetxt(log, out, delimiter=",")
-        return out
+# def exec_sam_instance(data, skeleton=None, gpus=0,
+#                       device='cpu', verbose=True, log=None,
+#                       lr=0.001, dlr=0.01, lambda1=0.001, lambda2=0.0000001, nh=200, dnh=500,
+#                       train=10000, test=1000, batchsize=-1,
+#                       losstype="fgan", dagstart=0, dagloss=False,
+#                       dagpenalization=0.001, dagpenalization_increase=0.0,
+#                       dag_threshold=0.5, linear=False, hlayers=2):
+#         out = run_SAM(data, skeleton=skeleton,
+#                       device=device,lr_gen=lr, lr_disc=dlr,
+#                       lambda1=lambda1, lambda2=lambda2,
+#                       nh=nh, dnh=dnh,
+#                       train=train,
+#                       test=test, batch_size=batchsize,
+#                       dagstart=dagstart,
+#                       dagloss=dagloss,
+#                       dagpenalization=dagpenalization,
+#                       dagpenalization_increase=dagpenalization_increase,
+#                       losstype=losstype,
+#                       dag_threshold=dag_threshold,
+#                       linear=linear,
+#                       hlayers=hlayers
+#                       )
+#         if log is not None:
+#             np.savetxt(log, out, delimiter=",")
+#         return out
 
 
 class SAM(object):
     """Structural Agnostic Model."""
 
-    def __init__(self, lr=0.001, dlr=0.01, lambda1=0.001, lambda2=0.0000001, nh=200, dnh=500,
+    def __init__(self, lr=0.01, dlr=0.01, lambda1=0.01, lambda2=0.00001, nh=200, dnh=200,
                  train_epochs=10000, test_epochs=1000, batchsize=-1,
-                 losstype="fgan", sampletype="sigmoidproba", initweight=0, dagstart=0, dagloss=False, dagpenalization=0.001,
-                 dagpenalization_increase=0.0, dag_threshold=0.5, linear=False, hlayers=2):
+                 losstype="fgan", dagstart=0.5, dagloss=True, dagpenalization=0,
+                 dagpenalization_increase=0.001, linear=False, hlayers=2):
 
         """Init and parametrize the SAM model.
 
@@ -306,7 +306,6 @@ class SAM(object):
         self.dagloss = dagloss
         self.dagpenalization = dagpenalization
         self.dagpenalization_increase = dagpenalization_increase
-        self.dag_threshold = dag_threshold
         self.linear = linear
         self.hlayers = hlayers
 
@@ -368,7 +367,6 @@ class SAM(object):
                                    dagpenalization=self.dagpenalization,
                                    dagpenalization_increase=self.dagpenalization_increase,
                                    losstype=self.losstype,
-                                   dag_threshold=self.dag_threshold,
                                    linear=self.linear,
                                    hlayers=self.hlayers)
             list_out.extend(results)
