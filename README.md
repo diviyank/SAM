@@ -1,4 +1,4 @@
-# SAM: Structural Agnostic Model, Causal Discovery and Penalized Adversarial Learning.
+# Structural Agnostic Modeling: Adversarial Learning of Causal Graphs
 This version is the new version of SAM, using structural gates and functional
 gates
 
